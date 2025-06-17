@@ -33,29 +33,136 @@ class BrainRotScraper:
             'surrealmemes'
         ]
     
-    def scrape_brain_rot(self, posts_per_sub=1000):
-        """Scrape brain rot content from Reddit"""
+    def scrape_brain_rot(self, posts_per_sub=2000):
+        """Scrape brain rot content from Reddit with proper rate limiting for large datasets"""
+        import time
+        import pickle
+        import os
+        
         all_text = []
+        checkpoint_file = "scraping_checkpoint.pkl"
+        
+        # Load checkpoint if exists
+        if os.path.exists(checkpoint_file):
+            with open(checkpoint_file, 'rb') as f:
+                checkpoint_data = pickle.load(f)
+                all_text = checkpoint_data.get('all_text', [])
+                completed_subs = checkpoint_data.get('completed_subs', [])
+                print(f"Resuming from checkpoint: {len(all_text)} texts collected")
+        else:
+            completed_subs = []
         
         for subreddit_name in self.target_subreddits:
+            if subreddit_name in completed_subs:
+                print(f"Skipping r/{subreddit_name} (already completed)")
+                continue
+                
             print(f"Scraping r/{subreddit_name}...")
             subreddit = self.reddit.subreddit(subreddit_name)
             
-            # Get hot posts
-            for submission in subreddit.hot(limit=posts_per_sub):
-                # Add post title and text
-                text_content = f"{submission.title}"
-                if submission.selftext:
-                    text_content += f" {submission.selftext}"
+            post_count = 0
+            batch_texts = []
+            
+            try:
+                # Get posts from multiple time periods for more data
+                post_sources = [
+                    subreddit.hot(limit=posts_per_sub//3),
+                    subreddit.top('month', limit=posts_per_sub//3),
+                    subreddit.new(limit=posts_per_sub//3)
+                ]
                 
-                # Add top comments (where the real brain rot lives)
-                submission.comments.replace_more(limit=0)
-                for comment in submission.comments.list()[:10]:  # Top 10 comments
-                    if len(comment.body) > 10 and comment.score > 1:
-                        text_content += f" {comment.body}"
-                
-                all_text.append(text_content)
+                for post_source in post_sources:
+                    for submission in post_source:
+                        try:
+                            # Skip if we've seen this post before
+                            if submission.id in [t.get('id') for t in batch_texts]:
+                                continue
+                                
+                            # Add post title and text
+                            text_content = f"{submission.title}"
+                            if submission.selftext:
+                                text_content += f" {submission.selftext}"
+                            
+                            # Get comments with better rate limiting
+                            try:
+                                submission.comments.replace_more(limit=0)
+                                comments = submission.comments.list()[:8]  # Top 8 comments
+                                
+                                for comment in comments:
+                                    if (hasattr(comment, 'body') and 
+                                        len(comment.body) > 10 and 
+                                        comment.score > 0 and
+                                        not comment.body.startswith('[deleted]')):
+                                        text_content += f" {comment.body}"
+                                        
+                            except Exception as comment_error:
+                                # Skip comments if there's an issue, keep the post
+                                pass
+                            
+                            batch_texts.append({
+                                'id': submission.id,
+                                'text': text_content,
+                                'subreddit': subreddit_name,
+                                'score': submission.score
+                            })
+                            
+                            post_count += 1
+                            
+                            # Adaptive rate limiting based on API response
+                            if post_count % 5 == 0:
+                                time.sleep(1)  # Short pause every 5 posts
+                                
+                            if post_count % 25 == 0:
+                                print(f"  Processed {post_count} posts from r/{subreddit_name}")
+                                time.sleep(3)  # Longer pause every 25 posts
+                                
+                            if post_count % 100 == 0:
+                                # Save checkpoint every 100 posts
+                                all_text.extend([item['text'] for item in batch_texts])
+                                checkpoint_data = {
+                                    'all_text': all_text,
+                                    'completed_subs': completed_subs
+                                }
+                                with open(checkpoint_file, 'wb') as f:
+                                    pickle.dump(checkpoint_data, f)
+                                print(f"  Checkpoint saved: {len(all_text)} total texts")
+                                batch_texts = []
+                                
+                        except Exception as post_error:
+                            print(f"  Error processing post: {post_error}")
+                            time.sleep(2)  # Longer pause on errors
+                            continue
+                            
+            except Exception as sub_error:
+                print(f"  Error accessing r/{subreddit_name}: {sub_error}")
+                print("  Waiting 30 seconds before continuing...")
+                time.sleep(30)
+                continue
+            
+            # Add remaining batch texts
+            all_text.extend([item['text'] for item in batch_texts])
+            completed_subs.append(subreddit_name)
+            
+            print(f"  Completed r/{subreddit_name}: {post_count} posts")
+            print(f"  Total texts collected so far: {len(all_text)}")
+            
+            # Save checkpoint after each subreddit
+            checkpoint_data = {
+                'all_text': all_text,
+                'completed_subs': completed_subs
+            }
+            with open(checkpoint_file, 'wb') as f:
+                pickle.dump(checkpoint_data, f)
+            
+            # Longer pause between subreddits
+            print("  Waiting 10 seconds before next subreddit...")
+            time.sleep(10)
         
+        # Clean up checkpoint file when done
+        if os.path.exists(checkpoint_file):
+            os.remove(checkpoint_file)
+            
+        print(f"Scraping complete! Collected {len(all_text)} total texts.")
         return all_text
     
     def clean_text(self, texts):
@@ -217,11 +324,11 @@ class BrainRotChatbot:
 # Usage Example
 if __name__ == "__main__":
     # Step 1: Scrape data (you'll need Reddit API credentials)
-    """
+    
     scraper = BrainRotScraper(
-        client_id="your_client_id",
-        client_secret="your_client_secret", 
-        user_agent="brainrot_scraper"
+        client_id="k4RKEdOhxfljGi0psvkg2w",
+        client_secret="5fbHWbaT_h1USXTHH3ZqR1Kykv86MA", 
+        user_agent="BrainRotBot/1.0 by Previous_Impress5216"
     )
     
     print("Scraping brain rot content...")
@@ -231,7 +338,7 @@ if __name__ == "__main__":
     # Save the data
     with open('brain_rot_data.json', 'w') as f:
         json.dump(clean_texts, f)
-    """
+    
     
     # Step 2: Train the model (assuming you have the data)
     """
